@@ -238,39 +238,55 @@
       .map((x) => x[1]);
   }
   const offCache = new Map();
-  async function offSearch(q, signal) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const aborted = () => new DOMException('Aborted', 'AbortError');
+  // Open Food Facts geeft regelmatig even "503 tijdelijk niet beschikbaar" terug.
+  // Daarom proberen we het een paar keer (afwisselend via de NL- en wereldserver).
+  async function offGetJSON(urls, signal, onRetry) {
+    let lastErr;
+    for (let i = 0; i < urls.length; i++) {
+      if (i) {
+        if (onRetry) onRetry(i);
+        await sleep(Math.min(350 * i, 1500));
+      }
+      if (signal && signal.aborted) throw aborted();
+      try {
+        const r = await fetchTimeout(urls[i], 12000, signal);
+        if (r.status === 404) return { notFound: true };
+        if (!r.ok) { lastErr = new Error('HTTP ' + r.status); continue; }
+        return await r.json();
+      } catch (e) {
+        if (signal && signal.aborted) throw e;
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('mislukt');
+  }
+  async function offSearch(q, signal, onRetry) {
     const key = norm(q);
     if (offCache.has(key)) return offCache.get(key);
-    let results = [];
-    // 1) Nieuwe, snelle zoekmachine van Open Food Facts
+    const qs = `search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=40&fields=${OFF_FIELDS}`;
+    const urls = ['nl', 'world', 'nl', 'world', 'nl', 'world', 'nl'].map((h) => `https://${h}.openfoodfacts.org/cgi/search.pl?${qs}&lc=nl`);
+    let results;
     try {
-      const u = `https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}&page_size=40&langs=nl,en&fields=${OFF_FIELDS}`;
-      const r = await fetchTimeout(u, 9000, signal);
-      if (r.ok) {
-        const j = await r.json();
-        results = (j.hits || j.products || []).map(parseOFF).filter(Boolean);
-      }
+      const j = await offGetJSON(urls, signal, onRetry);
+      results = (j.products || []).map(parseOFF).filter(Boolean);
     } catch (e) {
       if (signal && signal.aborted) throw e;
-    }
-    // 2) Terugval: klassieke zoek-API
-    if (!results.length) {
-      const u = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=40&lc=nl&fields=${OFF_FIELDS}`;
-      const r = await fetchTimeout(u, 15000, signal);
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      // Laatste redmiddel: de nieuwe zoekmachine (werkt alleen als die browsers toelaat)
+      const r = await fetchTimeout(`https://search.openfoodfacts.org/search?q=${encodeURIComponent(q)}&page_size=40&langs=nl,en&fields=${OFF_FIELDS}`, 8000, signal);
+      if (!r.ok) throw e;
       const j = await r.json();
-      results = (j.products || []).map(parseOFF).filter(Boolean);
+      results = (j.hits || []).map(parseOFF).filter(Boolean);
     }
     results = rankOFF(results, q).slice(0, 30);
     offCache.set(key, results);
     return results;
   }
   async function offProduct(code) {
-    const r = await fetchTimeout(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=${OFF_FIELDS}`, 12000);
-    if (r.status === 404) return { found: false };
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    if (!j.product || j.status === 0) return { found: false };
+    const path = `/api/v2/product/${encodeURIComponent(code)}.json?fields=${OFF_FIELDS}`;
+    const j = await offGetJSON(['world', 'nl', 'world', 'nl'].map((h) => `https://${h}.openfoodfacts.org${path}`));
+    if (j.notFound || !j.product || j.status === 0) return { found: false };
     const food = parseOFF({ code, ...j.product });
     return { found: true, food, raw: j.product };
   }
@@ -394,8 +410,8 @@
       ${!db.settings.setupDone ? `
         <div class="card">
           <h3>Welkom 👋</h3>
-          <p class="muted" style="margin:0 0 12px">Stel eerst je dagelijkse caloriedoel in. Je kunt het laten berekenen op basis van lengte, gewicht en activiteit, of zelf een getal invullen.</p>
-          <button class="btn" data-setup>Caloriedoel instellen</button>
+          <p class="muted" style="margin:0 0 12px">Stel eerst je dagelijkse caloriedoel in. Vul zelf een getal in, of laat het berekenen op basis van lengte, gewicht en activiteit.</p>
+          <div class="grid2"><button class="btn secondary" data-setup-manual>Zelf invullen</button><button class="btn" data-setup>Berekenen</button></div>
         </div>` : ''}
 
       <div class="card">
@@ -452,6 +468,8 @@
     $('[data-today]').addEventListener('click', () => { ui.date = dkey(new Date()); renderDiary(); });
     const setup = $('[data-setup]');
     if (setup) setup.addEventListener('click', () => openCalculator());
+    const setupManual = $('[data-setup-manual]');
+    if (setupManual) setupManual.addEventListener('click', openManualTarget);
     $$('[data-add]').forEach((b) => b.addEventListener('click', () => openAdd(b.dataset.add)));
     $$('[data-entry]').forEach((b) => b.addEventListener('click', () => {
       const e = (db.diary[ui.date] || []).find((x) => x.id === b.dataset.entry);
@@ -547,7 +565,10 @@
       st.status = 'loading';
       draw();
       try {
-        const res = await offSearch(q, ctl.signal);
+        const res = await offSearch(q, ctl.signal, () => {
+          const l = $('.loading', box);
+          if (l && !ctl.signal.aborted) l.lastChild.textContent = 'Database is druk, nog even proberen…';
+        });
         if (ctl.signal.aborted || st.q.trim() !== q) return;
         st.online = res;
         st.status = 'done';
@@ -564,7 +585,7 @@
       st.online = null;
       if (st.ctl) st.ctl.abort();
       clearTimeout(st.timer);
-      if (st.q.trim().length >= 3) st.timer = setTimeout(runOnline, 900);
+      if (st.q.trim().length >= 3) st.timer = setTimeout(runOnline, 1100);
       draw();
     });
     input.addEventListener('keydown', (e) => {
@@ -892,8 +913,11 @@
       <h1 class="page-title">Doelen</h1>
       <div class="card target-hero">
         <div class="unit">Dagelijks caloriedoel</div>
-        <div class="num">${fmt(db.settings.kcal)}</div>
-        <div class="unit">kcal per dag</div>
+        <label class="hero-edit">
+          <input class="hero-input" type="text" inputmode="numeric" enterkeyhint="done" value="${db.settings.kcal}" aria-label="Caloriedoel in kcal" data-kcal-inline>
+          <span class="pencil">${ICON.edit}</span>
+        </label>
+        <div class="unit">kcal per dag · tik op het getal om het te wijzigen</div>
         <div class="grid2" style="margin-top:16px">
           <button class="btn secondary" data-manual>Zelf invullen</button>
           <button class="btn" data-calc>Berekenen</button>
@@ -927,9 +951,17 @@
         </div>
         <input type="file" accept="application/json,.json" data-file hidden>
       </div>
-      <p class="note" style="text-align:center">Voedingsdata: <b>Open Food Facts</b> (open database, ODbL) + ingebouwde basislijst.<br>Bordje · versie 1.0</p>`;
+      <p class="note" style="text-align:center">Voedingsdata: <b>Open Food Facts</b> (open database, ODbL) + ingebouwde basislijst.<br>Bordje · versie 1.1</p>`;
 
     $('[data-manual]').addEventListener('click', openManualTarget);
+    const inl = $('[data-kcal-inline]');
+    inl.addEventListener('focus', () => setTimeout(() => inl.select(), 0));
+    inl.addEventListener('keydown', (e) => { if (e.key === 'Enter') inl.blur(); });
+    inl.addEventListener('change', () => {
+      const k = Math.round(num(inl.value) || 0);
+      if (k < 800 || k > 8000) { toast('Kies een waarde tussen 800 en 8000 kcal'); inl.value = db.settings.kcal; return; }
+      db.settings.kcal = k; db.settings.setupDone = true; save(); renderSettings(); toast(`Doel: ${fmt(k)} kcal per dag`);
+    });
     $('[data-calc]').addEventListener('click', () => openCalculator());
     $$('[data-preset]').forEach((b) => b.addEventListener('click', () => {
       const x = PRESETS[+b.dataset.preset];
@@ -1001,6 +1033,8 @@
       <label class="field"><span>Activiteit</span><select data-f="activity">${ACTIVITY.map((a, i) => `<option value="${i}" ${i === st.activity ? 'selected' : ''}>${a.name}</option>`).join('')}</select></label>
       <label class="field"><span>Doel</span><select data-f="goal">${GOALS.map((g, i) => `<option value="${i}" ${i === st.goal ? 'selected' : ''}>${g.name}</option>`).join('')}</select></label>
       <div class="result-box" data-result></div>
+      <label class="field"><span>Gebruik als doel (pas gerust zelf aan)</span>
+        <input type="text" inputmode="numeric" data-final style="font-size:22px;font-weight:700;text-align:center"></label>
       <p class="note">Berekend met de Mifflin-St Jeor-formule (rustverbruik) × activiteitsfactor, plus of min je doel. Een schatting: kijk na een paar weken hoe je gewicht reageert en stel bij.</p>`;
     s.foot.innerHTML = '<button class="btn" data-save>Gebruik dit doel</button>';
     let result = 0;
@@ -1021,6 +1055,7 @@
       const floor = st.sex === 'm' ? 1500 : 1200;
       result = Math.max(floor, Math.round((tdee + GOALS[st.goal].d) / 10) * 10);
       box.innerHTML = `<b>${fmt(result)} kcal</b><small>per dag · rustverbruik ${fmt(bmr)} · onderhoud ${fmt(tdee)} kcal</small>${result === floor && tdee + GOALS[st.goal].d < floor ? '<br><small>Afgerond naar het veilige minimum</small>' : ''}`;
+      $('[data-final]', s.body).value = result;
       $('[data-save]', s.foot).disabled = false;
     }
     $$('[data-sex]', s.body).forEach((b) => b.addEventListener('click', () => {
@@ -1028,9 +1063,12 @@
       $$('[data-sex]', s.body).forEach((x) => x.classList.toggle('on', x === b));
       calc();
     }));
-    $$('input, select', s.body).forEach((el) => el.addEventListener('input', calc));
+    $$('input:not([data-final]), select', s.body).forEach((el) => el.addEventListener('input', calc));
     $('[data-save]', s.foot).addEventListener('click', () => {
       if (!result) return;
+      const fin = Math.round(num($('[data-final]', s.body).value) || 0);
+      if (fin < 800 || fin > 8000) { toast('Kies een waarde tussen 800 en 8000 kcal'); return; }
+      result = fin;
       db.settings.kcal = result;
       db.settings.profile = { sex: st.sex, age: st.age, height: st.height, weight: st.weight, activity: st.activity, goal: st.goal };
       db.settings.setupDone = true;
