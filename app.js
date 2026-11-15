@@ -56,6 +56,7 @@
     search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2" fill="none"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
     barcode: '<svg viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8v8M10 8v8M13 8v8M17 8v8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" fill="none"/></svg>',
     flame: '<svg viewBox="0 0 24 24"><path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-4.5.3 1.5 1 2.5 2 3 0-3 0-5.5 1-8.5Z" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" fill="none"/></svg>',
+    camera: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 8h3l2-3h6l2 3h3v11H4z" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" fill="none"/><circle cx="12" cy="13" r="3.5" stroke="currentColor" stroke-width="1.9" fill="none"/></svg>',
     edit: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4Z" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" fill="none"/></svg>'
   };
 
@@ -797,19 +798,60 @@
   }
 
   // ---------- Barcode scanner ----------
-  let zxingLoading;
-  function loadZXing() {
-    if (window.ZXing) return Promise.resolve();
-    if (!zxingLoading) {
-      zxingLoading = new Promise((res, rej) => {
-        const sc = document.createElement('script');
-        sc.src = 'vendor/zxing.min.js';
-        sc.onload = () => res();
-        sc.onerror = () => { zxingLoading = null; rej(new Error('scanner laden mislukt')); };
-        document.head.appendChild(sc);
-      });
+  // Gebruikt de ingebouwde BarcodeDetector als de browser die heeft (Android/Chrome),
+  // anders zxing-cpp als WebAssembly (o.a. iPhone/Safari). Die herkent EAN-codes veel beter
+  // dan de oude JavaScript-scanner.
+  const BC_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'];
+  let detectorPromise;
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const sc = document.createElement('script');
+      sc.src = src;
+      sc.onload = () => res();
+      sc.onerror = () => rej(new Error('laden mislukt: ' + src));
+      document.head.appendChild(sc);
+    });
+  }
+  function getDetector() {
+    if (!detectorPromise) {
+      detectorPromise = (async () => {
+        if ('BarcodeDetector' in window) {
+          try {
+            const supported = await window.BarcodeDetector.getSupportedFormats();
+            const f = BC_FORMATS.filter((x) => supported.includes(x));
+            if (f.includes('ean_13')) return new window.BarcodeDetector({ formats: f });
+          } catch (e) { /* val terug op zxing-cpp */ }
+        }
+        if (!window.BarcodeDetectionAPI) await loadScript('vendor/barcode-detector.js');
+        const api = window.BarcodeDetectionAPI;
+        await api.prepareZXingModule({
+          overrides: {
+            locateFile: (path, prefix) => (path.endsWith('.wasm') ? new URL('vendor/' + path, location.href).href : prefix + path)
+          },
+          fireImmediately: true
+        });
+        return new api.BarcodeDetector({ formats: BC_FORMATS });
+      })().catch((e) => { detectorPromise = null; throw e; });
     }
-    return zxingLoading;
+    return detectorPromise;
+  }
+  const pickCode = (codes) => (codes || []).map((c) => String(c.rawValue || '').trim()).find((v) => /^\d{6,14}$/.test(v));
+
+  async function detectInImage(file) {
+    const det = await getDetector();
+    const bmp = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    // Eerst verkleind (snel), daarna op volle resolutie als er niets gevonden is
+    for (const max of [1600, Math.max(bmp.width, bmp.height)]) {
+      const sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
+      canvas.width = Math.round(bmp.width * sc);
+      canvas.height = Math.round(bmp.height * sc);
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      const code = pickCode(await det.detect(canvas));
+      if (code) return code;
+    }
+    return null;
   }
 
   function openScanner(meal, parent) {
@@ -817,20 +859,29 @@
     s.body.innerHTML = `
       <div class="scanner"><video playsinline muted autoplay></video><div class="frame"></div><div class="laser"></div></div>
       <p class="muted" data-status style="text-align:center">Camera starten…</p>
+      <label class="btn secondary photo-btn">${ICON.camera}Maak een foto van de barcode<input type="file" accept="image/*" capture="environment" data-photo hidden></label>
       <div class="searchrow" style="position:static">
         <label class="search">${ICON.barcode}<input type="text" inputmode="numeric" placeholder="Of typ de barcode" data-code enterkeyhint="search"></label>
         <button class="scanbtn" data-lookup aria-label="Zoeken">${ICON.search}</button>
       </div>`;
     const video = $('video', s.body);
     const status = $('[data-status]', s.body);
-    let reader = null;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     let stream = null;
+    let detector = null;
+    let running = true;
     let busy = false;
+    let detecting = false;
+    let lastCode = '';
+    let lastAt = 0;
+    const scanHint = 'Richt de camera op de barcode (10–20 cm afstand)';
 
     function stop() {
-      try { if (reader) reader.reset(); } catch (e) { /* ok */ }
+      running = false;
       if (stream) stream.getTracks().forEach((t) => t.stop());
-      if (video.srcObject) { video.srcObject.getTracks().forEach((t) => t.stop()); video.srcObject = null; }
+      stream = null;
+      video.srcObject = null;
     }
     s.onClose = stop;
 
@@ -860,42 +911,89 @@
       busy = false;
     }
 
+    function found(code) {
+      if (!code || busy || !running) return;
+      if (code === lastCode && Date.now() - lastAt < 8000) return; // dezelfde code niet steeds opnieuw opzoeken
+      lastCode = code;
+      lastAt = Date.now();
+      if (navigator.vibrate) navigator.vibrate(60);
+      lookup(code);
+    }
+
+    async function tick() {
+      if (!running) return;
+      if (detector && !busy && !detecting && video.readyState >= 2 && video.videoWidth) {
+        detecting = true;
+        try {
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          // Alleen het middelste deel van het beeld (rond het kader) scannen: sneller en nauwkeuriger
+          const cw = vw;
+          const ch = Math.round(vh * 0.6);
+          canvas.width = cw;
+          canvas.height = ch;
+          ctx.drawImage(video, 0, Math.round((vh - ch) / 2), cw, ch, 0, 0, cw, ch);
+          found(pickCode(await detector.detect(canvas)));
+        } catch (e) { /* volgende frame */ }
+        detecting = false;
+      }
+      setTimeout(tick, 120);
+    }
+
     $('[data-lookup]', s.body).addEventListener('click', () => lookup($('[data-code]', s.body).value));
     $('[data-code]', s.body).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); lookup(e.target.value); } });
+    $('[data-photo]', s.body).addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      status.innerHTML = '<span class="loading" style="padding:8px"><span class="spinner"></span>Foto lezen…</span>';
+      try {
+        const code = await detectInImage(file);
+        if (code) { lastCode = code; lastAt = Date.now(); lookup(code); }
+        else status.textContent = 'Geen barcode gevonden op de foto. Probeer het nog eens: recht van voren, scherp en goed belicht.';
+      } catch (err) {
+        status.textContent = 'Foto lezen lukt niet. Typ de barcode hieronder in.';
+      }
+    });
 
     (async () => {
+      // Scanner alvast op de achtergrond laden
+      const detP = getDetector().catch(() => null);
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        status.textContent = 'Camera is niet beschikbaar. Typ de barcode hieronder in.';
+        status.textContent = 'Live scannen kan hier niet. Gebruik “Maak een foto” of typ de barcode in.';
         return;
       }
       try {
-        await loadZXing();
-        if (!stack.includes(s)) return;
-        const Z = window.ZXing;
-        const hints = new Map();
-        hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E, Z.BarcodeFormat.CODE_128]);
-        hints.set(Z.DecodeHintType.TRY_HARDER, true);
-        reader = new Z.BrowserMultiFormatReader(hints, 150);
-        await reader.decodeFromConstraints(
-          { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-          video,
-          (result) => {
-            if (result && !busy) {
-              if (navigator.vibrate) navigator.vibrate(60);
-              try { reader.reset(); } catch (e) { /* ok */ }
-              lookup(result.getText());
-            }
-          }
-        );
-        stream = video.srcObject;
-        if (!stack.includes(s)) { stop(); return; }
-        status.textContent = 'Richt de camera op de barcode';
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        });
       } catch (e) {
         const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
         status.textContent = denied
-          ? 'Geen toegang tot de camera. Sta cameratoegang toe (Instellingen › Safari › Camera) of typ de barcode in.'
-          : 'Camera starten lukt niet. Typ de barcode hieronder in.';
+          ? 'Geen toegang tot de camera. Sta het toe via Instellingen › Safari › Camera, of gebruik “Maak een foto”.'
+          : 'Camera starten lukt niet. Gebruik “Maak een foto” of typ de barcode in.';
+        return;
       }
+      if (!running) { stream.getTracks().forEach((t) => t.stop()); return; }
+      video.muted = true;
+      video.setAttribute('playsinline', '');
+      video.srcObject = stream;
+      try { await video.play(); } catch (e) { /* autoplay staat aan */ }
+      try {
+        const track = stream.getVideoTracks()[0];
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        if (caps.focusMode && caps.focusMode.includes('continuous')) await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+      } catch (e) { /* niet ondersteund */ }
+      status.textContent = 'Scanner laden…';
+      detector = await detP;
+      if (!running) return;
+      if (!detector) {
+        status.textContent = 'De scanner kon niet laden. Gebruik “Maak een foto” of typ de barcode in.';
+        return;
+      }
+      status.textContent = scanHint;
+      tick();
     })();
   }
 
@@ -946,7 +1044,7 @@
         </div>
         <input type="file" accept="application/json,.json" data-file hidden>
       </div>
-      <p class="note" style="text-align:center">Voedingsdata: <b>Open Food Facts</b> (open database, ODbL) + ingebouwde basislijst.<br>Bordje · versie 1.2</p>`;
+      <p class="note" style="text-align:center">Voedingsdata: <b>Open Food Facts</b> (open database, ODbL) + ingebouwde basislijst.<br>Bordje · versie 1.3</p>`;
 
     $('[data-manual]').addEventListener('click', openManualTarget);
     const inl = $('[data-kcal-inline]');

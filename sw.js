@@ -1,5 +1,5 @@
 // Service worker: app werkt offline (behalve het online zoeken in Open Food Facts).
-const VERSION = 'bordje-v3';
+const VERSION = 'bordje-v4';
 const SHELL = [
   './',
   'index.html',

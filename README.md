@@ -46,7 +46,7 @@ Een PWA in gewone HTML, CSS en JavaScript, zonder build-stap.
 - `index.html`, `styles.css`, `app.js`: de app
 - `foods.js`: de ingebouwde basislijst
 - `sw.js`: service worker voor offline gebruik
-- `vendor/zxing.min.js`: barcodelezer ([ZXing](https://github.com/zxing-js/library), Apache-2.0)
+- `vendor/barcode-detector.js` + `vendor/zxing_reader.wasm`: barcodelezer ([barcode-detector](https://github.com/Sec-ant/barcode-detector) / [zxing-wasm](https://github.com/Sec-ant/zxing-wasm), MIT)
 - Voedingsdata: [Open Food Facts](https://world.openfoodfacts.org) (ODbL)
 
 Lokaal testen: `python3 -m http.server` in deze map en daarna `http://localhost:8000` openen.

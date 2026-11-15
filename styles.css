@@ -295,3 +295,6 @@ table.nt tr.sub td:first-child { padding-left: 14px; color: var(--muted); }
   opacity: 0; pointer-events: none; transition: all .25s ease; z-index: 50; max-width: calc(100% - 32px); text-align: center;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+.photo-btn { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 2px 0 12px; }
+.photo-btn svg { color: var(--accent); }
