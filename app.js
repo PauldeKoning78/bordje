@@ -148,6 +148,12 @@
     if (u.g === 1) return `${fmt(e.qty, 1)} g`;
     return `${fmt(e.qty, 2)} ${u.name} · ${fmt(e.grams)} g`;
   }
+  function defaultGrams(food) {
+    if (food.lastUnit != null && food.units[food.lastUnit] && food.lastQty) {
+      return Math.round(food.lastQty * food.units[food.lastUnit].g * 10) / 10;
+    }
+    return 100;
+  }
   function defaultAmount(food) {
     if (food.lastUnit != null && food.units[food.lastUnit]) return { unit: food.lastUnit, qty: food.lastQty || 1 };
     const i = food.units.findIndex((u) => u.g !== 1);
@@ -501,11 +507,9 @@
     function list(foods, emptyText) {
       if (!foods.length) return `<div class="list"><div class="empty">${emptyText}</div></div>`;
       return `<div class="list">${foods.map((f, i) => {
-        const d = defaultAmount(f);
-        const u = f.units[d.unit];
-        const grams = d.qty * u.g;
+        const grams = defaultGrams(f);
         const kc = (f.n.kcal * grams) / 100;
-        const sub = [f.brand, u.g === 1 ? `${fmt(d.qty)} g` : `${fmt(d.qty, 2)} ${u.name}`].filter(Boolean).join(' · ');
+        const sub = [f.brand, `${fmt(grams, 1)} g`].filter(Boolean).join(' · ');
         return `<button class="item" data-food="${i}">
           ${thumb(f)}
           <div class="main"><div class="t">${esc(f.name)}${f.source === 'custom' ? '<span class="badge">eigen</span>' : ''}</div><div class="s">${esc(sub)}</div></div>
@@ -601,22 +605,22 @@
   function openDetail(food, { meal, entry, parent } = {}) {
     const editing = !!entry;
     const s = openSheet({ title: editing ? 'Bewerken' : 'Product', left: editing ? 'close' : 'back' });
-    const d = editing ? { unit: entry.unit, qty: entry.qty } : defaultAmount(food);
-    const st = { unit: d.unit, qty: d.qty, meal: editing ? entry.meal : (meal || defaultMeal()) };
+    const g0 = editing ? Math.round(entry.grams * 10) / 10 : defaultGrams(food);
+    const st = { meal: editing ? entry.meal : (meal || defaultMeal()) };
 
     s.body.innerHTML = `
       <div class="prod-head">
         ${food.image ? `<img src="${esc(food.image)}" alt="">` : `<div class="thumb" style="width:64px;height:64px;font-size:26px">${esc((food.name || '?')[0].toUpperCase())}</div>`}
         <div><h3>${esc(food.name)}</h3><p>${esc([food.brand, food.quantity].filter(Boolean).join(' · ')) || (food.source === 'base' ? 'Basisvoedingsmiddel' : food.source === 'custom' ? 'Eigen product' : '')}</p></div>
       </div>
-      <div class="amount">
-        <input type="text" inputmode="decimal" value="${fmt(st.qty, 2)}" aria-label="Hoeveelheid" data-qty>
-        <select aria-label="Eenheid" data-unit>${food.units.map((u, i) => `<option value="${i}" ${i === st.unit ? 'selected' : ''}>${esc(unitLabel(u))}</option>`).join('')}</select>
-      </div>
+      <label class="gram-field">
+        <input type="text" inputmode="decimal" enterkeyhint="done" value="${fmt(g0, 1)}" aria-label="Hoeveelheid in gram" data-qty>
+        <span>gram</span>
+      </label>
       <div class="mealpick" style="margin-top:10px">${MEALS.map((m) => `<button data-meal="${m.id}" class="${m.id === st.meal ? 'on' : ''}">${m.name}</button>`).join('')}</div>
       <div data-nutri></div>
       <div class="card" style="margin-top:4px">
-        <table class="nt"><thead><tr><th>Voedingswaarde</th><th>per 100 g</th><th>deze portie</th></tr></thead><tbody data-table></tbody></table>
+        <table class="nt"><thead><tr><th>Voedingswaarde</th><th>per 100 g</th><th>jouw hoeveelheid</th></tr></thead><tbody data-table></tbody></table>
       </div>
       <p class="note">${food.source === 'off' ? `Bron: Open Food Facts${food.code ? ' · barcode ' + esc(food.code) : ''}. Waarden komen van de verpakking zoals ingevoerd door gebruikers.` : food.source === 'base' ? 'Gemiddelde waarden voor dit voedingsmiddel. Voor merkproducten: zoek online of scan de barcode.' : 'Eigen product.'}</p>
       ${food.source === 'custom' ? `<div class="btnrow" style="margin-top:12px"><button class="btn secondary" data-editcustom>Product bewerken</button></div>` : ''}`;
@@ -627,8 +631,7 @@
     </div>`;
 
     const qtyIn = $('[data-qty]', s.body);
-    const unitSel = $('[data-unit]', s.body);
-    function grams() { return (num(qtyIn.value) || 0) * food.units[+unitSel.value].g; }
+    function grams() { return num(qtyIn.value) || 0; }
     function update() {
       const g = grams();
       const n = nutrientsFor(food, g);
@@ -647,12 +650,8 @@
       $('[data-save]', s.foot).disabled = !(g > 0);
     }
     qtyIn.addEventListener('input', update);
-    qtyIn.addEventListener('focus', () => qtyIn.select());
-    unitSel.addEventListener('change', () => {
-      const u = food.units[+unitSel.value];
-      qtyIn.value = fmt(u.g === 1 ? Math.round(grams() || 100) : 1, 2);
-      update();
-    });
+    qtyIn.addEventListener('focus', () => setTimeout(() => qtyIn.select(), 0));
+    qtyIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-save]', s.foot).click(); } });
     $$('[data-meal]', s.body).forEach((b) => b.addEventListener('click', () => {
       st.meal = b.dataset.meal;
       $$('[data-meal]', s.body).forEach((x) => x.classList.toggle('on', x === b));
@@ -661,10 +660,10 @@
     if (ec) ec.addEventListener('click', () => { closeSheet(s); openCustom(food, { meal: st.meal, parent }); });
 
     $('[data-save]', s.foot).addEventListener('click', () => {
-      const qty = num(qtyIn.value);
-      const unit = +unitSel.value;
-      if (!qty || qty <= 0) return;
-      const g = qty * food.units[unit].g;
+      const g = grams();
+      if (!(g > 0)) return;
+      const qty = g;
+      const unit = 0;
       const day = (db.diary[ui.date] = db.diary[ui.date] || []);
       if (editing) {
         Object.assign(entry, { qty, unit, grams: g, meal: st.meal });
@@ -688,6 +687,7 @@
       toast('Verwijderd');
     });
     update();
+    qtyIn.focus();
   }
 
   // ---------- Snel toevoegen ----------
@@ -739,7 +739,6 @@
     const isEdit = !!(existing && existing.source === 'custom');
     const e = existing || {};
     const n = e.n || {};
-    const portion = (e.units || []).find((u) => u.g !== 1);
     const s = openSheet({ title: isEdit ? 'Product bewerken' : 'Eigen product', left: parent ? 'back' : 'close' });
     const f = (id, label, val, ph = '–', mode = 'decimal') => `<label class="field"><span>${label}</span><input type="text" ${mode ? `inputmode="${mode}"` : ''} data-f="${id}" value="${val == null || val === '' ? '' : esc(typeof val === 'number' ? fmt(val, 2) : val)}" placeholder="${ph}"></label>`;
     s.body.innerHTML = `
@@ -756,8 +755,6 @@
         ${f('fiber', 'Vezels (g)', n.fiber)}
         ${f('salt', 'Zout (g)', n.salt)}
       </div>
-      <div class="section-label" style="margin-top:6px">Portie (optioneel)</div>
-      <div class="grid2">${f('pname', 'Naam portie', portion ? portion.name : '', 'bijv. stuk', '')}${f('pgram', 'Gram per portie', portion ? portion.g : '', 'bijv. 40')}</div>
       <p class="note">Tip: neem de waarden over van het etiket (kolom “per 100 g”). Laat je kcal leeg, dan wordt die berekend uit de macro's.</p>`;
     s.foot.innerHTML = `<div class="btnrow"><button class="btn" data-save>${isEdit ? 'Opslaan' : 'Opslaan en kiezen'}</button>${isEdit ? '<button class="btn danger" data-del>Verwijderen uit mijn producten</button>' : ''}</div>`;
     const v = (k) => $(`[data-f="${k}"]`, s.body).value.trim();
@@ -772,8 +769,6 @@
       }
       if (kcal == null) { toast('Vul minstens de kcal in'); return; }
       const units = [{ name: 'gram', g: 1 }];
-      const pg = vn('pgram');
-      if (pg && pg > 0) units.push({ name: v('pname') || 'portie', g: pg });
       const food = {
         key: isEdit ? e.key : 'custom:' + uid(),
         source: 'custom',
@@ -783,7 +778,7 @@
       };
       if (isEdit) db.custom = db.custom.map((x) => (x.key === food.key ? food : x));
       else db.custom.unshift(food);
-      db.recents = db.recents.map((r) => (r.key === food.key ? { ...food, lastUnit: Math.min(r.lastUnit || 0, units.length - 1), lastQty: r.lastQty } : r));
+      db.recents = db.recents.map((r) => (r.key === food.key ? { ...food, lastUnit: 0, lastQty: defaultGrams(r) } : r));
       save();
       closeSheet(s);
       if (parent && parent.refresh) parent.refresh();
@@ -951,7 +946,7 @@
         </div>
         <input type="file" accept="application/json,.json" data-file hidden>
       </div>
-      <p class="note" style="text-align:center">Voedingsdata: <b>Open Food Facts</b> (open database, ODbL) + ingebouwde basislijst.<br>Bordje · versie 1.1</p>`;
+      <p class="note" style="text-align:center">Voedingsdata: <b>Open Food Facts</b> (open database, ODbL) + ingebouwde basislijst.<br>Bordje · versie 1.2</p>`;
 
     $('[data-manual]').addEventListener('click', openManualTarget);
     const inl = $('[data-kcal-inline]');
