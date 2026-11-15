@@ -22,9 +22,9 @@ De app moet op een HTTPS-adres staan, anders werken de camera en het offline geb
 ### 1. GitHub Pages aanzetten (eenmalig)
 1. Ga op github.com naar de repository → **Settings** → **Pages**.
 2. Kies bij *Source*: **Deploy from a branch**.
-3. Kies de branch met deze app (bijv. `main` na het mergen, of `claude/clever-babbage-enmcyv`) en de map **/(root)**. Klik op **Save**.
+3. Kies de branch **main** en de map **/(root)**. Klik op **Save**.
 4. Na een minuut of twee staat de app op:
-   `https://<jouw-gebruikersnaam>.github.io/<repository-naam>/calorie-app/`
+   `https://pauldekoning78.github.io/bordje/`
 
 > Gratis GitHub Pages werkt alleen als de repository **openbaar** is. In de app staan geen persoonlijke gegevens, want die worden alleen op je telefoon bewaard.
 
